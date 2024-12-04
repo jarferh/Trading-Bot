@@ -1,223 +1,313 @@
 //+------------------------------------------------------------------+
-//|                                                    bot.mq5   |
-//|                        Copyright 2023, Your Name                 |
-//|                                             https://www.mql5.com |
+//|                                                EMA_Crossover.mq5 |
+//|                               Developed by [Your Name or Company] |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2023, Your Name"
-#property link      "https://www.mql5.com"
-#property version   "1.00"
+#property copyright "Your Name or Company"
+#property link      "Your Website or Contact Info"
+#property version   "1.02"
 #property strict
 
-// Include necessary libraries
-#include <Trade\Trade.mqh>
+//--- Input parameters
+input double Lots=0.1;               // Lot size
+input double RiskReward=1.2;         // Risk-to-Reward Ratio (1:2)
+input int    StopLossPips=0;         // Stop Loss in Pips (0 to calculate dynamically)
+input int    MagicNumber=110048;      // Unique identifier for orders
+input int    StartHour=0;            // Trading start hour (0-23)
+input int    EndHour=24;             // Trading end hour (1-24)
 
-// Define Input Parameters
-input int EMA_Fast_Period = 9;    // Fast EMA period
-input int EMA_Slow_Period = 21;   // Slow EMA period
-input int RSI_Period = 14;        // RSI period
-input double RiskRewardRatio = 2; // Risk to Reward ratio (1:2)
-input double RiskPercent = 1.0;   // Risk percentage per trade
-input int RSI_Level = 50;         // RSI confirmation level
-input ENUM_TIMEFRAMES Timeframe = PERIOD_M5; // Select timeframe (M5, M15)
+//--- Indicators handles
+int EMA9_Handle;
+int EMA21_Handle;
+int RSI_Handle;
 
-// Define global variables
-int fast_ema_handle, slow_ema_handle, rsi_handle;
-CTrade trade;
+//--- Buffers for indicators
+double EMA9[];
+double EMA21[];
+double RSI[];
 
 //+------------------------------------------------------------------+
-// Initialize the Expert Advisor
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
 int OnInit()
-  {
-   // Initialize indicator handles
-   fast_ema_handle = iMA(_Symbol, Timeframe, EMA_Fast_Period, 0, MODE_EMA, PRICE_CLOSE);
-   slow_ema_handle = iMA(_Symbol, Timeframe, EMA_Slow_Period, 0, MODE_EMA, PRICE_CLOSE);
-   rsi_handle = iRSI(_Symbol, Timeframe, RSI_Period, PRICE_CLOSE);
-
-   // Check if handles are created successfully
-   if(fast_ema_handle == INVALID_HANDLE || slow_ema_handle == INVALID_HANDLE || rsi_handle == INVALID_HANDLE)
-     {
-      Print("Error creating indicator handles");
-      return(INIT_FAILED);
-     }
-
-   return(INIT_SUCCEEDED);
-  }
+{
+    //--- Create handles for indicators
+    EMA9_Handle  = iMA(_Symbol, _Period, 9, 0, MODE_EMA, PRICE_CLOSE);
+    EMA21_Handle = iMA(_Symbol, _Period, 21, 0, MODE_EMA, PRICE_CLOSE);
+    RSI_Handle   = iRSI(_Symbol, _Period, 14, PRICE_CLOSE);
+    
+    if(EMA9_Handle==INVALID_HANDLE || EMA21_Handle==INVALID_HANDLE || RSI_Handle==INVALID_HANDLE)
+    {
+        Print("Failed to create indicator handles");
+        return(INIT_FAILED);
+    }
+    
+    //--- Set arrays as series
+    ArraySetAsSeries(EMA9, true);
+    ArraySetAsSeries(EMA21, true);
+    ArraySetAsSeries(RSI, true);
+    
+    return(INIT_SUCCEEDED);
+}
 
 //+------------------------------------------------------------------+
-// The main function called on every new tick
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
 void OnTick()
-  {
-   // Get the latest price
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   
-   // Get indicator values
-   double fast_ema_buffer[];
-   double slow_ema_buffer[];
-   double rsi_buffer[];
-   
-   ArraySetAsSeries(fast_ema_buffer, true);
-   ArraySetAsSeries(slow_ema_buffer, true);
-   ArraySetAsSeries(rsi_buffer, true);
-   
-   // Copy indicator data
-   if(CopyBuffer(fast_ema_handle, 0, 0, 2, fast_ema_buffer) <= 0 ||
-      CopyBuffer(slow_ema_handle, 0, 0, 2, slow_ema_buffer) <= 0 ||
-      CopyBuffer(rsi_handle, 0, 0, 2, rsi_buffer) <= 0)
-     {
-      Print("Error copying indicator buffers");
-      return;
-     }
-   
-   double fast_ema = fast_ema_buffer[0];
-   double slow_ema = slow_ema_buffer[0];
-   double rsi_value = rsi_buffer[0];
+{
+    //--- Check trading hours
+    if(!IsWithinTradingHours())
+        return;
 
-   double fast_ema_prev = fast_ema_buffer[1];
-   double slow_ema_prev = slow_ema_buffer[1];
+    //--- Check for a new bar
+    static datetime lastBarTime=0;
+    datetime currentBarTime = iTime(_Symbol, _Period, 0);
+    if(currentBarTime == lastBarTime)
+        return;
+    lastBarTime = currentBarTime;
+    
+    //--- Get indicator values
+    CopyBuffer(EMA9_Handle,  0, 0, 3, EMA9);
+    CopyBuffer(EMA21_Handle, 0, 0, 3, EMA21);
+    CopyBuffer(RSI_Handle,   0, 0, 1, RSI);
+    
+    //--- Get current and previous EMA values
+    double EMA9_Current    = EMA9[0];
+    double EMA9_Previous   = EMA9[1];
+    double EMA21_Current   = EMA21[0];
+    double EMA21_Previous  = EMA21[1];
+    double RSI_Current     = RSI[0];
+    
+    //--- Check for existing orders
+    if(PositionSelect(_Symbol))
+    {
+        ManageExistingTrade();
+        return;
+    }
+    
+    //--- Check for buy or sell conditions
+    if(CheckBuyCondition(EMA9_Current, EMA9_Previous, EMA21_Current, EMA21_Previous, RSI_Current))
+    {
+        OpenBuyTrade();
+    }
+    else if(CheckSellCondition(EMA9_Current, EMA9_Previous, EMA21_Current, EMA21_Previous, RSI_Current))
+    {
+        OpenSellTrade();
+    }
+}
 
-   // Debug: Print current values
-   PrintFormat("Current Price: %.5f, Fast EMA: %.5f, Slow EMA: %.5f, RSI: %.2f", currentPrice, fast_ema, slow_ema, rsi_value);
-   PrintFormat("Previous Fast EMA: %.5f, Previous Slow EMA: %.5f", fast_ema_prev, slow_ema_prev);
+//+------------------------------------------------------------------+
+//| Check Trading Hours                                              |
+//+------------------------------------------------------------------+
+bool IsWithinTradingHours()
+{
+    //--- Get the current server time
+    datetime currentTime = TimeCurrent();
+    MqlDateTime struct_time;
+    TimeToStruct(currentTime, struct_time);
+    int currentHour = struct_time.hour;
 
-   // BUY CONDITION: Fast EMA crosses above Slow EMA and RSI is above RSI_Level
-   if(fast_ema > slow_ema && fast_ema_prev <= slow_ema_prev && rsi_value > RSI_Level)
-     {
-      Print("Buy condition met - EMA Crossover and RSI above ", RSI_Level);
-      // Check if price is above both EMAs
-      if(currentPrice > fast_ema && currentPrice > slow_ema)
+    //--- Adjust EndHour if needed
+    int adjustedEndHour = EndHour;
+    if (EndHour == 24)
+        adjustedEndHour = 0;
+
+    //--- Check if current time is within trading hours
+    if (StartHour < EndHour)
+    {
+        // Same day
+        return (currentHour >= StartHour && currentHour < EndHour);
+    }
+    else
+    {
+        // Over midnight
+        return (currentHour >= StartHour || currentHour < adjustedEndHour);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check Buy Condition                                              |
+//+------------------------------------------------------------------+
+bool CheckBuyCondition(double EMA9_Curr, double EMA9_Prev, double EMA21_Curr, double EMA21_Prev, double RSI_Curr)
+{
+    //--- EMA crossover: 9 EMA crosses above 21 EMA
+    bool EMA_Crossover = (EMA9_Prev < EMA21_Prev) && (EMA9_Curr > EMA21_Curr);
+    
+    //--- Price above both EMAs
+    double Price_Close = iClose(_Symbol, _Period, 1);
+    bool PriceAboveEMAs = (Price_Close > EMA9_Curr) && (Price_Close > EMA21_Curr);
+    
+    //--- RSI above 50
+    bool RSI_Confirm = (RSI_Curr > 50);
+    
+    return (EMA_Crossover && PriceAboveEMAs && RSI_Confirm);
+}
+
+//+------------------------------------------------------------------+
+//| Check Sell Condition                                             |
+//+------------------------------------------------------------------+
+bool CheckSellCondition(double EMA9_Curr, double EMA9_Prev, double EMA21_Curr, double EMA21_Prev, double RSI_Curr)
+{
+    //--- EMA crossover: 9 EMA crosses below 21 EMA
+    bool EMA_Crossover = (EMA9_Prev > EMA21_Prev) && (EMA9_Curr < EMA21_Curr);
+    
+    //--- Price below both EMAs
+    double Price_Close = iClose(_Symbol, _Period, 1);
+    bool PriceBelowEMAs = (Price_Close < EMA9_Curr) && (Price_Close < EMA21_Curr);
+    
+    //--- RSI below 50
+    bool RSI_Confirm = (RSI_Curr < 50);
+    
+    return (EMA_Crossover && PriceBelowEMAs && RSI_Confirm);
+}
+
+//+------------------------------------------------------------------+
+//| Open Buy Trade                                                   |
+//+------------------------------------------------------------------+
+void OpenBuyTrade()
+{
+    double SL, TP;
+    double Price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    
+    //--- Calculate Stop Loss below 21 EMA
+    SL = EMA21[0];
+    //--- Calculate Take Profit for 1:2 Risk-Reward
+    double RiskPips = (Price - SL) / _Point;
+    double RewardPips = RiskPips * RiskReward;
+    TP = Price + (RewardPips * _Point);
+    
+    //--- Create request
+    MqlTradeRequest request;
+    MqlTradeResult  result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
+    request.action   = TRADE_ACTION_DEAL;
+    request.symbol   = _Symbol;
+    request.volume   = Lots;
+    request.type     = ORDER_TYPE_BUY;
+    request.price    = Price;
+    request.sl       = NormalizeDouble(SL, _Digits);
+    request.tp       = NormalizeDouble(TP, _Digits);
+    request.magic    = MagicNumber;
+    request.deviation= 10;
+    request.type_filling = ORDER_FILLING_FOK;
+    
+    if(!OrderSend(request, result))
+    {
+        Print("Buy OrderSend failed: ", result.comment);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Open Sell Trade                                                  |
+//+------------------------------------------------------------------+
+void OpenSellTrade()
+{
+    double SL, TP;
+    double Price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    //--- Calculate Stop Loss above 21 EMA
+    SL = EMA21[0];
+    //--- Calculate Take Profit for 1:2 Risk-Reward
+    double RiskPips = (SL - Price) / _Point;
+    double RewardPips = RiskPips * RiskReward;
+    TP = Price - (RewardPips * _Point);
+    
+    //--- Create request
+    MqlTradeRequest request;
+    MqlTradeResult  result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
+    request.action   = TRADE_ACTION_DEAL;
+    request.symbol   = _Symbol;
+    request.volume   = Lots;
+    request.type     = ORDER_TYPE_SELL;
+    request.price    = Price;
+    request.sl       = NormalizeDouble(SL, _Digits);
+    request.tp       = NormalizeDouble(TP, _Digits);
+    request.magic    = MagicNumber;
+    request.deviation= 10;
+    request.type_filling = ORDER_FILLING_FOK;
+    
+    if(!OrderSend(request, result))
+    {
+        Print("Sell OrderSend failed: ", result.comment);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manage Existing Trade                                            |
+//+------------------------------------------------------------------+
+void ManageExistingTrade()
+{
+    ulong ticket = PositionGetTicket(0);
+    double EMA9_Current  = EMA9[0];
+    double EMA21_Current = EMA21[0];
+    
+    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    
+    //--- Check for alternative exit signal
+    bool ExitSignal = false;
+    
+    if(type == POSITION_TYPE_BUY)
+    {
+        //--- If 9 EMA crosses below 21 EMA, exit buy trade
+        if((EMA9[1] > EMA21[1]) && (EMA9[0] < EMA21[0]))
         {
-         Print("Price is above both EMAs. Attempting to open Buy order.");
-         // Calculate Stop-Loss and Take-Profit
-         double stop_loss = NormalizeDouble(slow_ema, _Digits);
-         double risk_size = NormalizeDouble(currentPrice - stop_loss, _Digits);
-         double take_profit = NormalizeDouble(currentPrice + (risk_size * RiskRewardRatio), _Digits);
-
-         // Open a Buy order
-         if(!OpenBuyOrder(currentPrice, stop_loss, take_profit))
-           {
-            Print("Failed to open Buy order");
-           }
+            ExitSignal = true;
         }
-      else
+    }
+    else if(type == POSITION_TYPE_SELL)
+    {
+        //--- If 9 EMA crosses above 21 EMA, exit sell trade
+        if((EMA9[1] < EMA21[1]) && (EMA9[0] > EMA21[0]))
         {
-         Print("Price is not above both EMAs. Buy order not opened.");
+            ExitSignal = true;
         }
-     }
-   else
-     {
-      PrintFormat("Buy condition not met: Fast EMA > Slow EMA: %s, Fast EMA crossover: %s, RSI > %d: %s",
-                  BoolToString(fast_ema > slow_ema),
-                  BoolToString(fast_ema > slow_ema && fast_ema_prev <= slow_ema_prev),
-                  RSI_Level,
-                  BoolToString(rsi_value > RSI_Level));
-     }
-
-   // SELL CONDITION: Fast EMA crosses below Slow EMA and RSI is below RSI_Level
-   if(fast_ema < slow_ema && fast_ema_prev >= slow_ema_prev && rsi_value < RSI_Level)
-     {
-      Print("Sell condition met - EMA Crossover and RSI below ", RSI_Level);
-      // Check if price is below both EMAs
-      if(currentPrice < fast_ema && currentPrice < slow_ema)
-        {
-         Print("Price is below both EMAs. Attempting to open Sell order.");
-         // Calculate Stop-Loss and Take-Profit
-         double stop_loss = NormalizeDouble(slow_ema, _Digits);
-         double risk_size = NormalizeDouble(stop_loss - currentPrice, _Digits);
-         double take_profit = NormalizeDouble(currentPrice - (risk_size * RiskRewardRatio), _Digits);
-
-         // Open a Sell order
-         if(!OpenSellOrder(currentPrice, stop_loss, take_profit))
-           {
-            Print("Failed to open Sell order");
-           }
-        }
-      else
-        {
-         Print("Price is not below both EMAs. Sell order not opened.");
-        }
-     }
-   else
-     {
-      PrintFormat("Sell condition not met: Fast EMA < Slow EMA: %s, Fast EMA crossover: %s, RSI < %d: %s",
-                  BoolToString(fast_ema < slow_ema),
-                  BoolToString(fast_ema < slow_ema && fast_ema_prev >= slow_ema_prev),
-                  RSI_Level,
-                  BoolToString(rsi_value < RSI_Level));
-     }
-  }
+    }
+    
+    if(ExitSignal)
+    {
+        ClosePosition(ticket);
+    }
+}
 
 //+------------------------------------------------------------------+
-// Function to open a Buy Order
-bool OpenBuyOrder(double price, double stopLoss, double takeProfit)
-  {
-   double lotSize = CalculateLotSize(price, stopLoss);
-   
-   if(trade.Buy(lotSize, _Symbol, NormalizeDouble(price, _Digits), NormalizeDouble(stopLoss, _Digits), NormalizeDouble(takeProfit, _Digits)))
-     {
-      Print("Buy order opened successfully. Ticket: ", trade.ResultOrder());
-      return true;
-     }
-   else
-     {
-      Print("Error opening Buy order: ", GetLastError());
-      return false;
-     }
-  }
-
+//| Close Position                                                   |
 //+------------------------------------------------------------------+
-// Function to open a Sell Order
-bool OpenSellOrder(double price, double stopLoss, double takeProfit)
-  {
-   double lotSize = CalculateLotSize(price, stopLoss);
-   
-   if(trade.Sell(lotSize, _Symbol, NormalizeDouble(price, _Digits), NormalizeDouble(stopLoss, _Digits), NormalizeDouble(takeProfit, _Digits)))
-     {
-      Print("Sell order opened successfully. Ticket: ", trade.ResultOrder());
-      return true;
-     }
-   else
-     {
-      Print("Error opening Sell order: ", GetLastError());
-      return false;
-     }
-  }
+void ClosePosition(ulong ticket)
+{
+    MqlTradeRequest request;
+    MqlTradeResult  result;
+    ZeroMemory(request);
+    ZeroMemory(result);
+    
+    ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+    double volume = PositionGetDouble(POSITION_VOLUME);
+    request.action   = TRADE_ACTION_DEAL;
+    request.symbol   = _Symbol;
+    request.volume   = volume;
+    request.magic    = MagicNumber;
+    request.position = ticket;
+    request.deviation= 10;
+    request.type_filling = ORDER_FILLING_FOK;
+    
+    if(type == POSITION_TYPE_BUY)
+    {
+        request.type  = ORDER_TYPE_SELL;
+        request.price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    }
+    else if(type == POSITION_TYPE_SELL)
+    {
+        request.type  = ORDER_TYPE_BUY;
+        request.price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    }
+    
+    if(!OrderSend(request, result))
+    {
+        Print("Close Position failed: ", result.comment);
+    }
+}
 
-//+------------------------------------------------------------------+
-// Function to calculate lot size based on risk percentage
-double CalculateLotSize(double entryPrice, double stopLoss)
-  {
-   double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskAmount = accountBalance * RiskPercent / 100;
-   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double pointValue = tickValue / tickSize;
-   
-   double riskInPoints = MathAbs(entryPrice - stopLoss) / tickSize;
-   double lotSize = NormalizeDouble(riskAmount / (riskInPoints * pointValue), 2);
-   
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   
-   lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
-   
-   Print("Calculated lot size: ", lotSize);
-   return lotSize;
-  }
-
-//+------------------------------------------------------------------+
-// Function to convert bool to string for debugging
-string BoolToString(bool value)
-  {
-   return value ? "true" : "false";
-  }
-
-//+------------------------------------------------------------------+
-// Deinitialization function
-void OnDeinit(const int reason)
-  {
-   // Clean up indicator handles
-   IndicatorRelease(fast_ema_handle);
-   IndicatorRelease(slow_ema_handle);
-   IndicatorRelease(rsi_handle);
-  }
 //+------------------------------------------------------------------+
